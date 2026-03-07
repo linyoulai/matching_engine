@@ -1,4 +1,5 @@
 // include/Order.h
+#pragma once
 #include <cstdint>
 
 // 买卖方向

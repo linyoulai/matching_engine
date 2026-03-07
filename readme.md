@@ -14,21 +14,12 @@
     // 订单
     struct Order {};
 
-    // 业务请求包
-    struct RequestEnvelope {
-        uint8_t type; // 0: 下单, 1: 撤单, 2: 查单
-        union {
-            OrderRequest order_req;
-            CancelRequest cancel_req;
-            QueryRequest query_req;
-        } data;
-    };
+2.请求(Request)：
+    请求类型：下单，撤单，查单
+    下单请求(OrderRequest)
+    撤单请求
+    查单请求
 
-    struct QueryRequest {
-        uint64_t tag;        // 8 字节
-        uint32_t trader_id;  // 4 字节
-        uint32_t symbol_id;  // 4 字节
-    }; // 合计 16 字节，完美对齐
 
 2.网关（Gateway）：
     打标签：负责给用户请求打标签（tag），标签 = 时间戳（timestamp） + 标的编号（symbol_id） + 递增序列号（递增序列号怎么获取？原子变量）
@@ -37,6 +28,10 @@
 
 4.订单簿（OrderBook）：
     用vector+list+unordered_map实现，price(int64_t)为索引，price的精度为0.01元，考虑到A股的涨跌停板一般在10%，所以价格跳跃不会很大，所以vector不会占用很多内存。开盘前加载昨日收盘价，乘1.1设置为涨停板，乘0.9设置为跌停板。
+    前收盘价(prev_close_price)：计算公式有些复杂，暂时设置为一个定值。
+    今日涨停板：前收盘价 * 11 / 10
+    今日跌停板：前收盘价 * 9 / 10
+    索引 = price - lower_limit_price
     price相同时用list存储订单：
         1.撮合引擎插入：直接在list尾部插入。
         2.撮合引擎取出：直接从list首部取出。

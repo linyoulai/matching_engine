@@ -1,4 +1,5 @@
 // include/Request.h
+#pragma once
 #include <cstdint>
 #include "Order.h"
 
