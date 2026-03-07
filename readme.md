@@ -7,7 +7,7 @@
 模块包括：
 
 1.订单（Order）：
-    包含字段：order_id（直接用网关层打的tag），ts，price，qty，filled_qty, side, order_type, tif, order_status
+    包含字段：order_id（直接用网关层打的tag），ts，symbol_id, trader_id, price，qty，filled_qty, side, order_type, tif, order_status
     订单类型枚举（OrderType）：包括限价单（LIMIT），市价单（MARKET）。
     TimeInForce：tif包括GTC，IOC，FOK。
     订单状态（OrderStatus）：NEW，EXPIRED，PARTIAL_FILLED，FILLED，REJECTED。
