@@ -12,9 +12,12 @@
     包含字段：order_id（直接用网关层打的tag），ts，symbol_id, trader_id, price，qty，filled_qty, side, order_type, tif, order_status
     订单类型枚举（OrderType）：包括限价单（LIMIT），市价单（MARKET）。
     TimeInForce：tif包括GTC，IOC，FOK。
+    限价单合法tif: GTC，IOC，FOK
+    市价单合法TIF: IOC，FOK
     订单状态（OrderStatus）：NEW，EXPIRED，PARTIAL_FILLED，FILLED，REJECTED。
     // 订单
     struct Order {};
+    
 
 2.请求(Request)：
     请求类型：下单，撤单，查单

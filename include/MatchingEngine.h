@@ -519,7 +519,17 @@ public:
     }
 
     void try_cancel(const CancelRequest& cancel_req) {
-
+        bool canceled = order_book.cancel_order(cancel_req.order_id);
+        TradeResponse resp;
+        resp.order_id = cancel_req.order_id;
+        resp.trader_id = cancel_req.trader_id;
+        resp.symbol_id = cancel_req.symbol_id;
+        resp.side = Side::BUY; // 撤单方向无法直接获取，暂时置为BUY
+        resp.price = 0;
+        resp.filled_qty = 0;
+        resp.status = canceled ? OrderStatus::CANCELED : OrderStatus::REJECTED;
+        trade_response_queue.enqueue(resp);
+        spdlog::info("Cancel order {} result: {}", cancel_req.order_id, canceled ? "CANCELED" : "REJECTED");
     }
     
 };
