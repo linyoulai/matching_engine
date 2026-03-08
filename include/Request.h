@@ -7,11 +7,12 @@
 enum class RequestType : uint8_t {
     ORDER,
     CANCEL,
-    QUERY
+    QUERY,
+    SUBSCRIBE_MARKET_DATA
 };
 
 // 下单请求
-struct OrderRequest {
+struct SubmitRequest {
     uint64_t tag;
     uint64_t ts;
     uint32_t symbol_id;
@@ -39,13 +40,20 @@ struct QueryRequest {
     uint32_t trader_id;  // 4 字节
 }; // 合计 16 字节，完美对齐
 
+// 订阅行情请求
+struct SubscribeMarketDataRequest {
+    uint32_t symbol_id;  // 4 字节
+    uint32_t trader_id;  // 4 字节
+}; // 8 字节，完美对齐
+
 // 业务请求包
 struct RequestEnvelope {
-    RequestType req_type; // 0: 下单, 1: 撤单, 2: 查单
+    RequestType req_type; // 0: 下单, 1: 撤单, 2: 查单, 3: 订阅行情
     union {
-        OrderRequest order_req;
+        SubmitRequest order_req;
         CancelRequest cancel_req;
         QueryRequest query_req;
+        SubscribeMarketDataRequest subscribe_md_req;
     } data;
 };
 
