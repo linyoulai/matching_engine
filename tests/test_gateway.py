@@ -27,6 +27,21 @@ payload_limit = {
 order_id = print_result("Submit Valid Limit Order", 
                         requests.post(f"{BASE_URL}/submit_order", json=payload_limit, headers=HEADERS))
 
+# 下买单
+print("--- 1. Submit Order Test ---")
+payload_limit = {
+    "symbol_id": 888, 
+    "trader_id": 1001, 
+    "price": 10051, 
+    "qty": 200, 
+    "side": "BUY", 
+    "order_type": "LIMIT", 
+    "tif": "GTC"
+}
+order_id = print_result("Submit Valid Limit Order", 
+                        requests.post(f"{BASE_URL}/submit_order", json=payload_limit, headers=HEADERS))
+
+
 # # 下个无法撮合的卖单
 # payload_sell = {
 #     "symbol_id": 888, 
@@ -57,11 +72,11 @@ order_id = print_result("Submit Valid Limit Order",
 payload_sell_full = {
     "symbol_id": 888, 
     "trader_id": 1004, 
-    "price": 10000, 
+    "price": 10051, 
     "qty": 300, 
     "side": "SELL", 
     "order_type": "LIMIT", 
-    "tif": "GTC"
+    "tif": "IOC"
 }
 print_result("Submit Fully Matchable Sell Order", 
              requests.post(f"{BASE_URL}/submit_order", json=payload_sell_full, headers=HEADERS))

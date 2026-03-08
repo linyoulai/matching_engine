@@ -150,7 +150,7 @@
         3.撮合引擎撤单：用unordered_map快速查询，如果查到了，就撤单。如果没有查到，说明已经成交了，就返回REJECTED。
     用unordered_map存储每个订单对象的迭代器，用于快速撤单和查单。
 
-5.撮合引擎（MatchingEngine）：
+5.单线程撮合引擎（MatchingEngine）：
     这是核心，撮合引擎会从输入无锁队列中取出请求并尝试撮合，如果不能撮合就加入订单簿。
     应该支持下单（submit_order）、撤单(cancel_order)。
     撮合引擎每秒生成5档盘口快照（这里的5档是指有单的价格档位，如果所剩单不足5档，往后读到5档并置零即可），异步发送给行情推送无锁队列（MarketDataQueue）。
@@ -158,6 +158,20 @@
         1.大额市价单保护：用户下单撮合只能吃5档订单，不能超出。
         2.防止价格超出：用户下单时检查价格是否大于涨停板或小于跌停板，如果是的话就拒绝（不知道这个规则是否合理？）
         3.防止自成交：用户下单后撮合时检查trader_id是否相同，如果能够撮合成功但是trader_id相同，立即停止撮合，但不撤回之前撮合成功的成交。剩余的订单状态改为REJECTED，并发送给TradeResponseQueue。
+    核心成员：
+        下单撤单队列的引用 order_queue 撮合引擎是消费者
+        成交回报队列的引用 trade_response_queue 撮合引擎是生产者
+        行情推送队列的引用 market_data_queue 撮合引擎是生产者
+        订单簿 OrderBook 维护买卖双方的订单
+    核心函数：
+        构造函数: 传入引用order_queue, trade_response_queue, market_data_queue
+        死循环运行 run() : 轮询 order_queue , 如果有订单则 try_match()。
+        尝试撮合 try_match() ：如果撮合成功，生成成交回报，如果有剩余或者没能撮合成功，加入订单簿。
+
+6.主函数：
+    创建order_queue, trade_response_queue, market_data_queue
+    创建撮合引擎对象，传入队列引用
+    创建网关对象，传入队列引用
 
 6.成交回报(存在于网关模块中)：当撮合完毕时，异步地将结果放入成交回报无锁队列（TradeResponseQueue），由网关取出并发回给用户。
 

@@ -126,11 +126,11 @@
 // 网关
 class Gateway {
 private:
-    // 4个无锁队列
-    moodycamel::ConcurrentQueue<RequestEnvelope> order_queue; // 下单、撤单队列，多生产者单消费者：多用户请求-撮合引擎
+    // 无锁队列
+    moodycamel::ConcurrentQueue<RequestEnvelope>& order_queue; // 下单、撤单队列，多生产者单消费者：多用户请求-撮合引擎
     // moodycamel::ConcurrentQueue<QueryRequest> query_queue; // 查单队列，多生产者单消费者：多用户请求-订单簿查询
-    moodycamel::ConcurrentQueue<TradeResponse> trade_response_queue; // 成交回报队列，单生产者单消费者：撮合引擎-网关
-    moodycamel::ConcurrentQueue<MarketDataResponse> market_data_queue; // 行情推送队列，单生产者单消费者：撮合引擎-网关
+    moodycamel::ConcurrentQueue<TradeResponse>& trade_response_queue; // 成交回报队列，单生产者单消费者：撮合引擎-网关
+    moodycamel::ConcurrentQueue<MarketDataResponse>& market_data_queue; // 行情推送队列，单生产者单消费者：撮合引擎-网关
     
     // 订单状态映射表，维护订单状态，供查单请求查询
     std::unordered_map<uint64_t, OrderStatus> order_status_map; // order_id -> OrderStatus
@@ -154,7 +154,7 @@ private:
     // 开关
     std::atomic<bool> running{false};
     // 处理下单、撤单的线程
-    std::thread order_processor;
+    // std::thread order_processor;
     // 处理查单的线程
     // std::thread query_processor;
     // 分发成交回报的线程
@@ -165,23 +165,22 @@ private:
     std::thread http_server_thread;
     httplib::Server svr; 
 
-    void process_order_request() {
-        // 取出下单、撤单请求，放入订单队列
-        RequestEnvelope req_env;
-        while (running.load()) {
-            if (order_queue.try_dequeue(req_env)) {
-                spdlog::debug("Order request ready for Matching Engine, tag = {}", req_env.data.order_req.tag);
-
-                // 更新订单状态
-                {
-                    std::unique_lock<std::shared_mutex> lock(order_status_mutex);
-                    order_status_map[req_env.data.order_req.tag] = OrderStatus::NEW;
-                }
-            } else {
-                std::this_thread::yield();
-            }
-        }
-    }
+    // void process_order_request() {
+    //     RequestEnvelope req_env;
+    //     while (running.load()) {
+    //         if (order_queue.try_dequeue(req_env)) {
+    //             // 放入订单队列
+    //             order_queue.
+    //             // 更新订单状态
+    //             {
+    //                 std::unique_lock<std::shared_mutex> lock(order_status_mutex);
+    //                 order_status_map[req_env.data.order_req.tag] = OrderStatus::NEW;
+    //             }
+    //         } else {
+    //             std::this_thread::yield();
+    //         }
+    //     }
+    // }
     void process_query_request() {
         // 取出查单请求，从订单状态映射表查询订单状态，分发给用户。
 
@@ -198,7 +197,19 @@ private:
                 }
                 // 模拟“发给用户”：目前仅作为日志记录
                 // 未来实现 WebSocket 时，这里将通过 trader_id 找到对应的 Session 并推送
-                spdlog::debug("Trade report ready for Trader {}", res.trader_id);
+                spdlog::info("Trade Response - order_id: {}, trader_id: {}, symbol_id: {}, side: {}, filled_qty: {}, price: {}, status: {}",
+                    res.order_id, res.trader_id, res.symbol_id, res.side == Side::BUY ? "BUY" : "SELL", res.filled_qty, res.price, 
+                    [&]{
+                        switch (res.status) {
+                            case OrderStatus::NEW: return "NEW";
+                            case OrderStatus::PARTIAL_FILLED: return "PARTIAL_FILLED";
+                            case OrderStatus::FILLED: return "FILLED";
+                            case OrderStatus::EXPIRED: return "EXPIRED";
+                            case OrderStatus::REJECTED: return "REJECTED";
+                            case OrderStatus::CANCELED: return "CANCELED";
+                            default: return "UNKNOWN";
+                        }
+                    }());
             } else {
                 std::this_thread::yield();
             }
@@ -211,9 +222,12 @@ private:
 
 
 public:
-    Gateway() {
+    Gateway(moodycamel::ConcurrentQueue<RequestEnvelope>& order_queue, 
+            moodycamel::ConcurrentQueue<TradeResponse>& trade_response_queue,
+            moodycamel::ConcurrentQueue<MarketDataResponse>& market_data_queue) : 
+        order_queue(order_queue), trade_response_queue(trade_response_queue), market_data_queue(market_data_queue) {
         running.store(true);
-        order_processor = std::thread(&Gateway::process_order_request, this);
+        // order_processor = std::thread(&Gateway::process_order_request, this);
         // query_processor = std::thread(&Gateway::process_query_request, this);
         trade_response_procesor = std::thread(&Gateway::process_trade_responses, this);
         market_data_processor = std::thread(&Gateway::process_market_data, this);
@@ -223,7 +237,7 @@ public:
     ~Gateway() {
         running.store(false);
         svr.stop(); 
-        if (order_processor.joinable()) order_processor.join();
+        // if (order_processor.joinable()) order_processor.join();
         // if (query_processor.joinable()) query_processor.join();
         if (trade_response_procesor.joinable()) trade_response_procesor.join();
         if (market_data_processor.joinable()) market_data_processor.join();

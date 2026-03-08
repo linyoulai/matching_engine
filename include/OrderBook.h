@@ -31,13 +31,13 @@ class OrderBook {
 private:
     int64_t upper_limit_price; // 涨停板价格，单位为分
     int64_t lower_limit_price; // 跌停板价格
-
+    std::unordered_map<uint64_t, OrderLocation> order_map; // 订单ID到订单迭代器的映射
+public:
     std::vector<std::list<Order>> bid_book; // 买单簿
     std::vector<std::list<Order>> ask_book; // 卖单簿
 
-    std::unordered_map<uint64_t, OrderLocation> order_map; // 订单ID到订单迭代器的映射
 public:
-    explicit OrderBook(int64_t prev_close_price) {
+    explicit OrderBook(int64_t prev_close_price = 10000) { // 默认前收盘价为100.00元，即10000分
         upper_limit_price = static_cast<int64_t>(std::round(prev_close_price * 1.1));
         lower_limit_price = static_cast<int64_t>(std::round(prev_close_price * 0.9));
 
@@ -46,6 +46,24 @@ public:
         ask_book.resize(book_length);
 
         order_map.reserve(1000);
+    }
+
+    int64_t get_best_bid() const {
+        for (size_t i = bid_book.size() - 1; i >= 0; --i) {
+            if (!bid_book[i].empty()) {
+                return lower_limit_price + static_cast<int64_t>(i);
+            }
+        }
+        return -1; // 没有买单
+    }
+
+    int64_t get_best_ask() const {
+        for (size_t i = 0; i < ask_book.size(); ++i) {
+            if (!ask_book[i].empty()) {
+                return lower_limit_price + static_cast<int64_t>(i);
+            }
+        }
+        return -1; // 没有卖单
     }
 
     void add_order(const Order& order) {
@@ -70,7 +88,6 @@ public:
         return true;
     }
 
-private:
     // 将价格转换为订单簿索引
     inline size_t price_to_index(int64_t price) const {
         if (price < lower_limit_price) [[unlikely]] {
@@ -80,5 +97,13 @@ private:
             throw std::out_of_range("Price is above upper limit");
         }
         return (size_t)(price - lower_limit_price);
+    }
+
+    int64_t get_upper_limit_price() const {
+        return upper_limit_price;
+    }
+
+    int64_t get_lower_limit_price() const {
+        return lower_limit_price;
     }
 };
