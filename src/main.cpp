@@ -12,7 +12,7 @@ int main() {
         spdlog::info("System is up and running. Press Enter to exit.");
         
         while (true) {
-            spdlog::info("heart beat");
+            // spdlog::info("heart beat");
             sleep(10);
         }
     } catch (const std::exception& e) {

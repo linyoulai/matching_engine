@@ -128,7 +128,7 @@ class Gateway {
 private:
     // 4个无锁队列
     moodycamel::ConcurrentQueue<RequestEnvelope> order_queue; // 下单、撤单队列，多生产者单消费者：多用户请求-撮合引擎
-    moodycamel::ConcurrentQueue<QueryRequest> query_queue; // 查单队列，多生产者单消费者：多用户请求-订单簿查询
+    // moodycamel::ConcurrentQueue<QueryRequest> query_queue; // 查单队列，多生产者单消费者：多用户请求-订单簿查询
     moodycamel::ConcurrentQueue<TradeResponse> trade_response_queue; // 成交回报队列，单生产者单消费者：撮合引擎-网关
     moodycamel::ConcurrentQueue<MarketDataResponse> market_data_queue; // 行情推送队列，单生产者单消费者：撮合引擎-网关
     
@@ -136,12 +136,14 @@ private:
     std::unordered_map<uint64_t, OrderStatus> order_status_map; // order_id -> OrderStatus
     std::shared_mutex order_status_mutex; // 保护订单状态映射表的读写锁
 
+    // 一个 uint64_t 是 64 位。毫秒级时间戳大约占 41 位（可以用到 2039 年），标的编号给 8 位（支持 256 个股票），递增序列号给 15 位（每毫秒支持 32768 笔下单）。
+    // 拼接公式：tag = (timestamp << 23) | (symbol_id << 15) | (sequence_num & 0x7FFF)。
     // 维护一个原子变量作为递增序列号生成器
     std::atomic<uint64_t> sequence_num{0};
     std::pair<uint64_t, uint64_t> generate_ts_and_tag(uint32_t symbol_id) {
         uint64_t timestamp = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count());
-        uint64_t tag = (timestamp << 32) | (symbol_id << 16) | (sequence_num.fetch_add(1) & 0xFFFF);
+        uint64_t tag = (timestamp << 23) | (symbol_id << 15) | (sequence_num.fetch_add(1) & 0x7FFF);
         return std::make_pair(timestamp, tag);
     }
 
@@ -154,7 +156,7 @@ private:
     // 处理下单、撤单的线程
     std::thread order_processor;
     // 处理查单的线程
-    std::thread query_processor;
+    // std::thread query_processor;
     // 分发成交回报的线程
     std::thread trade_response_procesor;
     // 分发行情推送的线程
@@ -164,13 +166,43 @@ private:
     httplib::Server svr; 
 
     void process_order_request() {
+        // 取出下单、撤单请求，放入订单队列
+        RequestEnvelope req_env;
+        while (running.load()) {
+            if (order_queue.try_dequeue(req_env)) {
+                spdlog::debug("Order request ready for Matching Engine, tag = {}", req_env.data.order_req.tag);
 
+                // 更新订单状态
+                {
+                    std::unique_lock<std::shared_mutex> lock(order_status_mutex);
+                    order_status_map[req_env.data.order_req.tag] = OrderStatus::NEW;
+                }
+            } else {
+                std::this_thread::yield();
+            }
+        }
     }
     void process_query_request() {
-        
+        // 取出查单请求，从订单状态映射表查询订单状态，分发给用户。
+
+
     }
     void process_trade_responses() {
-
+        // 取出成交回报，记录订单状态变化, 分发给用户。
+        TradeResponse res;
+        while (running.load()) {
+            if (trade_response_queue.try_dequeue(res)) {
+                {
+                    std::unique_lock<std::shared_mutex> lock(order_status_mutex);
+                    order_status_map[res.order_id] = res.status;
+                }
+                // 模拟“发给用户”：目前仅作为日志记录
+                // 未来实现 WebSocket 时，这里将通过 trader_id 找到对应的 Session 并推送
+                spdlog::debug("Trade report ready for Trader {}", res.trader_id);
+            } else {
+                std::this_thread::yield();
+            }
+        }
     }
     void process_market_data() {
 
@@ -182,7 +214,7 @@ public:
     Gateway() {
         running.store(true);
         order_processor = std::thread(&Gateway::process_order_request, this);
-        query_processor = std::thread(&Gateway::process_query_request, this);
+        // query_processor = std::thread(&Gateway::process_query_request, this);
         trade_response_procesor = std::thread(&Gateway::process_trade_responses, this);
         market_data_processor = std::thread(&Gateway::process_market_data, this);
         http_server_thread = std::thread(&Gateway::register_route, this);
@@ -192,7 +224,7 @@ public:
         running.store(false);
         svr.stop(); 
         if (order_processor.joinable()) order_processor.join();
-        if (query_processor.joinable()) query_processor.join();
+        // if (query_processor.joinable()) query_processor.join();
         if (trade_response_procesor.joinable()) trade_response_procesor.join();
         if (market_data_processor.joinable()) market_data_processor.join();
         if (http_server_thread.joinable()) http_server_thread.join();
@@ -241,16 +273,36 @@ public:
             }
         });
 
+        // 既然网关用户查单 -> 网关查 map -> 异步放入已经用 unordered_map 缓存了最新状态，
+        // HTTP 查单接口收到请求后，直接加读锁查 map，立刻返回 HTTP 响应即可。不需要再放进队列里绕一圈，那样反而增加了 HTTP 响应的延迟和复杂度。
         // 3.查单接口：/query_order
         svr.Post("/query_order", [this](const httplib::Request& req, httplib::Response& res) {
             try {
                 auto body = nlohmann::json::parse(req.body);
-                QueryRequest query_req;
-                query_req.order_id = body["order_id"];
-                query_req.symbol_id = body["symbol_id"];
-                query_req.trader_id = body["trader_id"];
-                this->on_query_order(query_req); 
-                res.set_content("{\"status\":\"ACCEPTED\"}", "application/json");
+                uint64_t oid = body["order_id"];
+                // 使用读锁（Shared Lock），允许多个用户同时并发查单
+                std::shared_lock<std::shared_mutex> lock(order_status_mutex);
+                if (order_status_map.count(oid)) {
+                    nlohmann::json resp;
+                    resp["order_id"] = oid;
+                    std::string status_str;
+                    OrderStatus status = order_status_map[oid];
+                    switch (status) {
+                        case OrderStatus::NEW: status_str = "NEW"; break;
+                        case OrderStatus::PARTIAL_FILLED: status_str = "PARTIAL_FILLED"; break;
+                        case OrderStatus::FILLED: status_str = "FILLED"; break;
+                        case OrderStatus::EXPIRED: status_str = "EXPIRED"; break;
+                        case OrderStatus::REJECTED: status_str = "REJECTED"; break;
+                        case OrderStatus::CANCELED: status_str = "CANCELED"; break;
+                        default: status_str = "UNKNOWN"; break;
+                    }
+                    resp["status"] = status_str;
+                    resp["message"] = "Success";
+                    res.set_content(resp.dump(), "application/json");
+                } else {
+                    res.status = 404;
+                    res.set_content("{\"status\":\"NOT_FOUND\", \"message\":\"Order ID does not exist\"}", "application/json");
+                }
             } catch (...) {
                 res.status = 400;
                 res.set_content("{\"status\":\"REJECTED\"}", "application/json");
@@ -304,11 +356,11 @@ public:
         order_queue.enqueue(envelope); // 加入撤单队列
     }
     // 查单接口
-    void on_query_order(const QueryRequest& req) {
-        spdlog::debug("Received query order request: order_id={}, symbol_id={}, trader_id={}",
-            req.order_id, req.symbol_id, req.trader_id);
-        query_queue.enqueue(req); // 加入查单队列
-    }
+    // void on_query_order(const QueryRequest& req) {
+    //     spdlog::debug("Received query order request: order_id={}, symbol_id={}, trader_id={}",
+    //         req.order_id, req.symbol_id, req.trader_id);
+    //     // query_queue.enqueue(req); // 加入查单队列
+    // }
     // 行情订阅
     void on_subscribe_market_data(const SubscribeMarketDataRequest& req) {
         spdlog::debug("Received subscribe market data request: symbol_id={}, trader_id={}",
