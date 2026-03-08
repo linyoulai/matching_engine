@@ -99,7 +99,50 @@ public:
 
     bool can_fill_all(const Order& order) {
         // 实现检查是否能全额成交的逻辑
-        return true; // 占位符，实际应根据订单簿状态实现
+        if (order.side == Side::BUY) {
+            int64_t best_ask = order_book.get_best_ask();
+            uint32_t total_available_qty = 0;
+            while (best_ask != -1 && order.price >= best_ask) {
+                const std::list<Order>& ask_list = order_book.ask_book[order_book.price_to_index(best_ask)];
+                for (const Order& ask_order : ask_list) {
+                    total_available_qty += (ask_order.qty - ask_order.filled_qty);
+                    if (total_available_qty >= order.qty) {
+                        return true; // 足够的卖单可供成交
+                    }
+                }
+                // 寻找下一个最优卖价
+                while (order_book.ask_book[order_book.price_to_index(best_ask)].empty()) {
+                    if (best_ask < order_book.get_upper_limit_price()) {
+                        best_ask++;
+                    } else {
+                        best_ask = -1; // 没有更多卖单了
+                        break;
+                    }
+                }
+            }
+        } else { // SELL
+            int64_t best_bid = order_book.get_best_bid();
+            uint32_t total_available_qty = 0;
+            while (best_bid != -1 && order.price <= best_bid) {
+                const std::list<Order>& bid_list = order_book.bid_book[order_book.price_to_index(best_bid)];
+                for (const Order& bid_order : bid_list) {
+                    total_available_qty += (bid_order.qty - bid_order.filled_qty);
+                    if (total_available_qty >= order.qty) {
+                        return true; // 足够的买单可供成交
+                    }
+                }
+                // 寻找下一个最优买价
+                while (order_book.bid_book[order_book.price_to_index(best_bid)].empty()) {
+                    if (best_bid > order_book.get_lower_limit_price()) {
+                        best_bid--;
+                    } else {
+                        best_bid = -1; // 没有更多买单了
+                        break;
+                    }
+                }
+            }
+        }
+        return false;
     } 
 
 
@@ -195,14 +238,110 @@ public:
                         order_book.add_order(order);
                     }
                 } else if (order.tif == TimeInForce::IOC) {
+                    // IOC订单处理逻辑
+                    int64_t best_ask = order_book.get_best_ask();
+                    while (order.qty > order.filled_qty && best_ask != -1 && order.price >= best_ask) {
+                        Order& best_ask_order = order_book.ask_book[order_book.price_to_index(best_ask)].front();
+                        uint32_t trade_qty = std::min(order.qty - order.filled_qty, best_ask_order.qty - best_ask_order.filled_qty);
+                        int64_t trade_price = best_ask_order.price; // 价格优先原则，成交价为对手方订单价格
+                        order.filled_qty += trade_qty;
+                        best_ask_order.filled_qty += trade_qty;
 
+                        // 生成买方成交回报
+                        TradeResponse trade_response;
+                        trade_response.order_id = order.order_id;
+                        trade_response.trader_id = order.trader_id;
+                        trade_response.symbol_id = order.symbol_id;
+                        trade_response.side = order.side;
+                        trade_response.price = trade_price;
+                        trade_response.filled_qty = trade_qty;
+                        trade_response.status = (order.qty == order.filled_qty) ? OrderStatus::FILLED : OrderStatus::PARTIAL_FILLED;
+                        trade_response_queue.enqueue(trade_response); // 发送
+
+                        // 生成卖方成交回报
+                        TradeResponse sell_trade_response;
+                        sell_trade_response.order_id = best_ask_order.order_id;
+                        sell_trade_response.trader_id = best_ask_order.trader_id;
+                        sell_trade_response.symbol_id = best_ask_order.symbol_id;
+                        sell_trade_response.side = best_ask_order.side;
+                        sell_trade_response.price = trade_price;
+                        sell_trade_response.filled_qty = trade_qty;
+                        sell_trade_response.status = (best_ask_order.qty == best_ask_order.filled_qty) ? OrderStatus::FILLED : OrderStatus::PARTIAL_FILLED;
+                        trade_response_queue.enqueue(sell_trade_response); // 发送
+
+                        if (best_ask_order.qty == best_ask_order.filled_qty) {
+                            // 对手方订单完全成交，移除订单簿中的订单
+                            order_book.ask_book[order_book.price_to_index(best_ask)].pop_front();
+                        }
+
+                        // 寻找下一个最优卖价
+                        while (order_book.ask_book[order_book.price_to_index(best_ask)].empty()) {
+                            if (best_ask < order_book.get_upper_limit_price()) {
+                                best_ask++;
+                            } else {
+                                best_ask = -1; // 没有更多卖单了
+                                break;
+                            }
+                        }
+                    }
+                    // IOC订单未完全成交的部分直接丢弃，不加入订单簿
+                }
+            } else if (order.order_type == OrderType::MARKET) {
+                if (order.tif == TimeInForce::IOC) {
+                    // 市价IOC订单处理逻辑，类似于上面的限价IOC，但不需要价格比较，直接撮合到最优价格直到数量满足或没有对手单了
+                    int64_t best_ask = order_book.get_best_ask();
+                    // 5档价格保护
+                    int64_t price_limit = (best_ask != -1) ? best_ask + 4 : order_book.get_upper_limit_price(); // 市价单只能吃到5档价格
+                    while (order.qty > order.filled_qty && best_ask != -1 && best_ask <= price_limit) {
+                        Order& best_ask_order = order_book.ask_book[order_book.price_to_index(best_ask)].front();
+                        uint32_t trade_qty = std::min(order.qty - order.filled_qty, best_ask_order.qty - best_ask_order.filled_qty);
+                        int64_t trade_price = best_ask_order.price; // 价格优先原则，成交价为对手方订单价格
+                        order.filled_qty += trade_qty;
+                        best_ask_order.filled_qty += trade_qty;
+
+                        // 生成买方成交回报
+                        TradeResponse trade_response;
+                        trade_response.order_id = order.order_id;
+                        trade_response.trader_id = order.trader_id;
+                        trade_response.symbol_id = order.symbol_id;
+                        trade_response.side = order.side;
+                        trade_response.price = trade_price;
+                        trade_response.filled_qty = trade_qty;
+                        trade_response.status = (order.qty == order.filled_qty) ? OrderStatus::FILLED : OrderStatus::PARTIAL_FILLED;
+                        trade_response_queue.enqueue(trade_response); // 发送
+
+                        // 生成卖方成交回报
+                        TradeResponse sell_trade_response;
+                        sell_trade_response.order_id = best_ask_order.order_id;
+                        sell_trade_response.trader_id = best_ask_order.trader_id;
+                        sell_trade_response.symbol_id = best_ask_order.symbol_id;
+                        sell_trade_response.side = best_ask_order.side;
+                        sell_trade_response.price = trade_price;
+                        sell_trade_response.filled_qty = trade_qty;
+                        sell_trade_response.status = (best_ask_order.qty == best_ask_order.filled_qty) ? OrderStatus::FILLED : OrderStatus::PARTIAL_FILLED;
+                        trade_response_queue.enqueue(sell_trade_response); // 发送
+
+                        if (best_ask_order.qty == best_ask_order.filled_qty) {
+                            // 对手方订单完全成交，移除订单簿中的订单
+                            order_book.ask_book[order_book.price_to_index(best_ask)].pop_front();
+                        }
+
+                        // 寻找下一个最优卖价
+                        while (order_book.ask_book[order_book.price_to_index(best_ask)].empty()) {
+                            if (best_ask < order_book.get_upper_limit_price()) {
+                                best_ask++;
+                            } else {
+                                best_ask = -1; // 没有更多卖单了
+                                break;
+                            }
+                        }
+                    }
+                    // 市价IOC订单未完全成交的部分直接丢弃，不加入订单簿    
+                } else {
+                    spdlog::error("Unsupported order type for order_id {}: MARKET orders must be IOC", order.order_id);
                 }
             } else {
-                if (order.tif == TimeInForce::GTC) {
-
-                } else if (order.tif == TimeInForce::IOC) {
-
-                }
+                spdlog::error("Unknown order type for order_id {}: {}", order.order_id, static_cast<uint8_t>(order.order_type));
             }
         } else {
             if (order.order_type == OrderType::LIMIT) {
@@ -269,14 +408,112 @@ public:
                     }
 
                 } else if (order.tif == TimeInForce::IOC) {
+                    // IOC订单处理逻辑
+                    int64_t best_bid = order_book.get_best_bid();
+                    while (order.qty > order.filled_qty && best_bid != -1 && order.price <= best_bid) {
+                        Order& best_bid_order = order_book.bid_book[order_book.price_to_index(best_bid)].front();
+                        uint32_t trade_qty = std::min(order.qty - order.filled_qty, best_bid_order.qty - best_bid_order.filled_qty);
+                        int64_t trade_price = best_bid_order.price; // 价格优先原则，成交价为对手方订单价格
+                        order.filled_qty += trade_qty;
+                        best_bid_order.filled_qty += trade_qty;
 
+                        // 生成卖方成交回报
+                        TradeResponse trade_response;
+                        trade_response.order_id = order.order_id;
+                        trade_response.trader_id = order.trader_id;
+                        trade_response.symbol_id = order.symbol_id;
+                        trade_response.side = order.side;
+                        trade_response.price = trade_price;
+                        trade_response.filled_qty = trade_qty;
+                        trade_response.status = (order.qty == order.filled_qty) ? OrderStatus::FILLED : OrderStatus::PARTIAL_FILLED;
+                        trade_response_queue.enqueue(trade_response); // 发送
+
+                        // 生成买方成交回报
+                        TradeResponse buy_trade_response;
+                        buy_trade_response.order_id = best_bid_order.order_id;
+                        buy_trade_response.trader_id = best_bid_order.trader_id;
+                        buy_trade_response.symbol_id = best_bid_order.symbol_id;
+                        buy_trade_response.side = best_bid_order.side;
+                        buy_trade_response.price = trade_price;
+                        buy_trade_response.filled_qty = trade_qty;
+                        buy_trade_response.status = (best_bid_order.qty == best_bid_order.filled_qty) ? OrderStatus::FILLED : OrderStatus::PARTIAL_FILLED;
+                        trade_response_queue.enqueue(buy_trade_response); // 发送
+
+                        if (best_bid_order.qty == best_bid_order.filled_qty) {
+                            // 对手方订单完全成交，移除订单簿中的订单
+                            order_book.bid_book[order_book.price_to_index(best_bid)].pop_front();
+                        }
+
+                        // 寻找下一个最优买价
+                        while (order_book.bid_book[order_book.price_to_index(best_bid)].empty()) {
+                            if (best_bid > order_book.get_lower_limit_price()) {
+                                best_bid--;
+                            } else {
+                                best_bid = -1; // 没有更多买单了
+                                break;
+                            }
+                        }
+                    }
+                    // IOC订单未完全成交的部分直接丢弃，不加入订单簿
+
+                }
+            } else if (order.order_type == OrderType::MARKET) {
+                if (order.tif == TimeInForce::IOC) {
+                    // 市价IOC订单处理逻辑，类似于上面的限价IOC，但不需要价格比较，直接撮合到最优价格直到数量满足或没有对手单了
+                    int64_t best_bid = order_book.get_best_bid();
+                    // 5档价格保护
+                    int64_t price_limit = (best_bid != -1) ? best_bid - 4 : order_book.get_lower_limit_price(); // 市价单只能吃到5档价格
+                    while (order.qty > order.filled_qty && best_bid != -1 && best_bid >= price_limit) {
+                        Order& best_bid_order = order_book.bid_book[order_book.price_to_index(best_bid)].front();
+                        uint32_t trade_qty = std::min(order.qty - order.filled_qty, best_bid_order.qty - best_bid_order.filled_qty);
+                        int64_t trade_price = best_bid_order.price; // 价格优先原则，成交价为对手方订单价格
+                        order.filled_qty += trade_qty;
+                        best_bid_order.filled_qty += trade_qty;
+
+                        // 生成卖方成交回报
+                        TradeResponse trade_response;
+                        trade_response.order_id = order.order_id;
+                        trade_response.trader_id = order.trader_id;
+                        trade_response.symbol_id = order.symbol_id;
+                        trade_response.side = order.side;
+                        trade_response.price = trade_price;
+                        trade_response.filled_qty = trade_qty;
+                        trade_response.status = (order.qty == order.filled_qty) ? OrderStatus::FILLED : OrderStatus::PARTIAL_FILLED;
+                        trade_response_queue.enqueue(trade_response); // 发送
+
+                        // 生成买方成交回报
+                        TradeResponse buy_trade_response;
+                        buy_trade_response.order_id = best_bid_order.order_id;
+                        buy_trade_response.trader_id = best_bid_order.trader_id;
+                        buy_trade_response.symbol_id = best_bid_order.symbol_id;
+                        buy_trade_response.side = best_bid_order.side;
+                        buy_trade_response.price = trade_price;
+                        buy_trade_response.filled_qty = trade_qty;
+                        buy_trade_response.status = (best_bid_order.qty == best_bid_order.filled_qty) ? OrderStatus::FILLED : OrderStatus::PARTIAL_FILLED;
+                        trade_response_queue.enqueue(buy_trade_response); // 发送
+
+                        if (best_bid_order.qty == best_bid_order.filled_qty) {
+                            // 对手方订单完全成交，移除订单簿中的订单
+                            order_book.bid_book[order_book.price_to_index(best_bid)].pop_front();
+                        }
+
+                        // 寻找下一个最优买价
+                        while (order_book.bid_book[order_book.price_to_index(best_bid)].empty()) {
+                            if (best_bid > order_book.get_lower_limit_price()) {
+                                best_bid--;
+                            } else {
+                                best_bid = -1; // 没有更多买单了
+                                break;
+                            }
+                        }
+                    }
+                    // 市价IOC订单未完全成交的部分直接丢弃，不加入订单簿
+
+                } else {
+                    spdlog::error("Unsupported order type for order_id {}: MARKET orders must be IOC", order.order_id);
                 }
             } else {
-                if (order.tif == TimeInForce::GTC) {
-
-                } else if (order.tif == TimeInForce::IOC) {
-
-                }
+                spdlog::error("Unknown order type for order_id {}: {}", order.order_id, static_cast<uint8_t>(order.order_type));
             }
         }
     }
