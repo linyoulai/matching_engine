@@ -2,6 +2,7 @@
 #include "Gateway.h"
 #include <spdlog/spdlog.h>
 #include <iostream>
+#include <string>
 #include "concurrentqueue.h"
 #include "MatchingEngine.h"
 
@@ -12,7 +13,7 @@
     创建网关对象，传入队列引用
 */
 
-int main() {
+int main(int argc, char** argv) {
     spdlog::set_level(spdlog::level::debug);
     spdlog::info("System Starting...");
 
@@ -24,6 +25,30 @@ int main() {
 
         MatchingEngine engine(order_queue, trade_response_queue, market_data_queue);
         Gateway gateway(order_queue, trade_response_queue, market_data_queue);
+
+        if (argc > 1 && std::string(argv[1]) == "--stress") {
+            // 压测模式下关闭 debug 洪泛日志，避免淹没最终统计摘要
+            spdlog::set_level(spdlog::level::warn);
+            int thread_count = 100;
+            int ops_per_thread = 20000;
+            if (argc > 2) {
+                thread_count = std::stoi(argv[2]);
+            }
+            if (argc > 3) {
+                ops_per_thread = std::stoi(argv[3]);
+            }
+
+            spdlog::info("Run stress mode: threads={}, ops_per_thread={}", thread_count, ops_per_thread);
+            gateway.stress_submit_cancel(thread_count, ops_per_thread);
+
+            // 给撮合线程和回报线程一点时间清空队列
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+            spdlog::info("Stress mode finished, exiting...");
+            return 0;
+        }
+
+        std::this_thread::sleep_for(std::chrono::seconds(1)); // 当前线程休眠
+        gateway.mock_submit_and_cancel(); // 模拟一些下单和撤单请求
 
         while (true) {
             std::this_thread::sleep_for(std::chrono::seconds(1)); // 当前线程休眠

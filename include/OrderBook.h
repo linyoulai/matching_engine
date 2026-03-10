@@ -31,8 +31,8 @@ class OrderBook {
 private:
     int64_t upper_limit_price; // 涨停板价格，单位为分
     int64_t lower_limit_price; // 跌停板价格
-    std::unordered_map<uint64_t, OrderLocation> order_map; // 订单ID到订单迭代器的映射
 public:
+    std::unordered_map<uint64_t, OrderLocation> order_map; // 订单ID到订单迭代器的映射
     std::vector<std::list<Order>> bid_book; // 买单簿
     std::vector<std::list<Order>> ask_book; // 卖单簿
 
@@ -78,6 +78,7 @@ public:
     bool cancel_order(uint64_t order_id) {
         auto it = order_map.find(order_id);
         if (it == order_map.end()) {
+            spdlog::debug("没找到订单, 撤单失败");
             return false; // 订单不存在，可能已经成交了
         }
         const OrderLocation& loc = it->second;
@@ -86,6 +87,14 @@ public:
         target_list.erase(loc.it); // 从订单簿中删除订单
         order_map.erase(it); // 从映射中删除订单
         return true;
+    }
+
+    void remove_order(uint64_t order_id) {
+        OrderLocation loc = order_map[order_id];
+        std::vector<std::list<Order>> target_book = loc.side == Side::BUY ? bid_book : ask_book;
+        target_book[price_to_index(loc.price)].erase(loc.it); // 从订单簿中删除订单
+        order_map.erase(order_id); // 从映射中删除订单
+        spdlog::debug("订单已成交, 已从订单簿中删除订单");
     }
 
     // 将价格转换为订单簿索引

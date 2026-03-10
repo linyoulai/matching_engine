@@ -115,6 +115,10 @@
 #include <shared_mutex> // C++17
 #include <thread>
 #include <unordered_set>
+#include <vector>
+#include <random>
+#include <chrono>
+#include <algorithm>
 #include "../lib/concurrentqueue.h"
 #include "Request.h"
 #include "Response.h"
@@ -384,6 +388,148 @@ public:
             std::lock_guard<std::mutex> lock(market_data_subscribers_mutex);
             market_data_subscribers.insert(req.trader_id); // 记录订阅者
         }
+    }
+
+    void mock_submit_and_cancel() {
+        // 模拟提交一个订单
+        SubmitRequest submit_req;
+        auto ts_and_tag = generate_ts_and_tag(888);
+        submit_req.ts = ts_and_tag.first;
+        submit_req.tag = ts_and_tag.second;
+        submit_req.symbol_id = 888;
+        submit_req.trader_id = 1001;
+        submit_req.price = 10050;
+        submit_req.qty = 200;
+        submit_req.side = Side::BUY;
+        submit_req.order_type = OrderType::LIMIT;
+        submit_req.tif = TimeInForce::GTC;
+        this->on_submit_order(submit_req);
+
+        // 提交一个订单把上面的订单吃掉
+        SubmitRequest submit_req2;
+        auto ts_and_tag2 = generate_ts_and_tag(888);
+        submit_req2.ts = ts_and_tag2.first;
+        submit_req2.tag = ts_and_tag2.second;
+        submit_req2.symbol_id = 888;
+        submit_req2.trader_id = 1002;
+        submit_req2.price = 10040;
+        submit_req2.qty = 300;
+        submit_req2.side = Side::SELL;
+        submit_req2.order_type = OrderType::LIMIT;
+        submit_req2.tif = TimeInForce::GTC;
+        this->on_submit_order(submit_req2);
+
+        // 模拟撤单
+        CancelRequest cancel_req;
+        cancel_req.order_id = submit_req.tag; // 用订单ID撤单
+        cancel_req.symbol_id = 888;
+        cancel_req.trader_id = 1001;
+        this->on_cancel_order(cancel_req);
+
+        CancelRequest cancel_req2;
+        cancel_req2.order_id = submit_req2.tag; // 用订单ID撤单
+        cancel_req2.symbol_id = 888;
+        cancel_req2.trader_id = 1002;
+        this->on_cancel_order(cancel_req2);
+    }
+
+    // 压测入口：并发提交/撤单，验证撮合引擎在高压下的稳定性
+    // thread_count: 并发压测线程数
+    // ops_per_thread: 每个线程执行的下单操作次数（期间会穿插撤单）
+    void stress_submit_cancel(int thread_count, int ops_per_thread) {
+        if (thread_count <= 0 || ops_per_thread <= 0) {
+            spdlog::warn("stress_submit_cancel skipped: invalid args thread_count={}, ops_per_thread={}",
+                thread_count, ops_per_thread);
+            return;
+        }
+
+        // 记录压测总耗时，用于评估吞吐能力
+        auto stress_start = std::chrono::steady_clock::now();
+        std::vector<std::thread> workers;
+        workers.reserve(static_cast<size_t>(thread_count));
+
+        // 原子计数器：统计总提交/撤单次数，避免多线程写冲突
+        std::atomic<uint64_t> total_submits{0};
+        std::atomic<uint64_t> total_cancels{0};
+
+        // 启动 N 个工作线程，每个线程独立构造订单并通过网关接口入队
+        for (int tid = 0; tid < thread_count; ++tid) {
+            workers.emplace_back([this, tid, ops_per_thread, &total_submits, &total_cancels]() {
+                // 每个线程独立随机源，减少同构请求导致的测试偏差
+                std::mt19937_64 rng(static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()) + static_cast<uint64_t>(tid));
+                std::uniform_int_distribution<int> side_dist(0, 1);
+                std::uniform_int_distribution<int> price_dist(10000, 10100);
+                std::uniform_int_distribution<int> qty_dist(1, 1000);
+                std::uniform_int_distribution<int> coin(0, 99);
+                std::uniform_int_distribution<uint32_t> symbol_dist(1, 3);
+
+                // 保存本线程提交的订单ID，后续随机撤单与收尾撤单都会用到
+                std::vector<uint64_t> local_order_ids;
+                local_order_ids.reserve(static_cast<size_t>(ops_per_thread));
+
+                for (int i = 0; i < ops_per_thread; ++i) {
+                    SubmitRequest submit_req;
+                    uint32_t symbol_id = symbol_dist(rng);
+                    auto ts_and_tag = generate_ts_and_tag(symbol_id);
+                    submit_req.ts = ts_and_tag.first;
+                    submit_req.tag = ts_and_tag.second;
+                    submit_req.symbol_id = symbol_id;
+                    submit_req.trader_id = static_cast<uint32_t>(1000 + tid);
+                    submit_req.price = price_dist(rng);
+                    submit_req.qty = static_cast<uint32_t>(qty_dist(rng));
+                    submit_req.side = side_dist(rng) == 0 ? Side::BUY : Side::SELL;
+                    submit_req.order_type = OrderType::LIMIT;
+                    submit_req.tif = TimeInForce::GTC;
+
+                    on_submit_order(submit_req);
+                    total_submits.fetch_add(1, std::memory_order_relaxed);
+                    local_order_ids.push_back(submit_req.tag);
+
+                    // 约 30% 概率触发撤单，模拟真实流量里“下单后很快撤单”的行为
+                    if (!local_order_ids.empty() && coin(rng) < 30) {
+                        std::uniform_int_distribution<size_t> pick(0, local_order_ids.size() - 1);
+                        size_t idx = pick(rng);
+
+                        CancelRequest cancel_req;
+                        cancel_req.order_id = local_order_ids[idx];
+                        cancel_req.symbol_id = symbol_id;
+                        cancel_req.trader_id = submit_req.trader_id;
+                        on_cancel_order(cancel_req);
+                        total_cancels.fetch_add(1, std::memory_order_relaxed);
+
+                        local_order_ids[idx] = local_order_ids.back();
+                        local_order_ids.pop_back();
+                    }
+                }
+
+                // 收尾：把本线程仍未撤掉的订单尽量全部撤掉，增加状态机覆盖面
+                for (uint64_t oid : local_order_ids) {
+                    CancelRequest cancel_req;
+                    cancel_req.order_id = oid;
+                    cancel_req.symbol_id = 1;
+                    cancel_req.trader_id = static_cast<uint32_t>(1000 + tid);
+                    on_cancel_order(cancel_req);
+                    total_cancels.fetch_add(1, std::memory_order_relaxed);
+                }
+            });
+        }
+
+        // 等待所有压测线程结束，确保统计完整
+        for (auto& w : workers) {
+            if (w.joinable()) {
+                w.join();
+            }
+        }
+
+        auto stress_end = std::chrono::steady_clock::now();
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(stress_end - stress_start).count();
+        // 输出压测摘要：线程数、总请求量与耗时
+        spdlog::warn("Stress finished: threads={}, ops_per_thread={}, submits={}, cancels={}, elapsed_ms={}",
+            thread_count,
+            ops_per_thread,
+            total_submits.load(std::memory_order_relaxed),
+            total_cancels.load(std::memory_order_relaxed),
+            elapsed_ms);
     }
 
 };

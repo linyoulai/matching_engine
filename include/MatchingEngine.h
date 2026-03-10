@@ -218,6 +218,7 @@ public:
                         if (best_ask_order.qty == best_ask_order.filled_qty) {
                             // 对手方订单完全成交，移除订单簿中的订单
                             spdlog::debug("Best ask order_id {} fully filled, removing from order book", best_ask_order.order_id);
+                            order_book.order_map.erase(best_ask_order.order_id);
                             order_book.ask_book[order_book.price_to_index(best_ask)].pop_front();
                         } 
                         if (order.filled_qty == order.qty) {
@@ -273,6 +274,7 @@ public:
 
                         if (best_ask_order.qty == best_ask_order.filled_qty) {
                             // 对手方订单完全成交，移除订单簿中的订单
+                            order_book.order_map.erase(best_ask_order.order_id);
                             order_book.ask_book[order_book.price_to_index(best_ask)].pop_front();
                         }
 
@@ -325,6 +327,7 @@ public:
 
                         if (best_ask_order.qty == best_ask_order.filled_qty) {
                             // 对手方订单完全成交，移除订单簿中的订单
+                            order_book.order_map.erase(best_ask_order.order_id);
                             order_book.ask_book[order_book.price_to_index(best_ask)].pop_front();
                         }
 
@@ -385,6 +388,7 @@ public:
                         if (best_bid_order.qty == best_bid_order.filled_qty) {
                             // 对手方订单完全成交，移除订单簿中的订单
                             spdlog::debug("Best bid order_id {} fully filled, removing from order book", best_bid_order.order_id);
+                            order_book.order_map.erase(best_bid_order.order_id);
                             order_book.bid_book[order_book.price_to_index(best_bid)].pop_front();
                         } 
                         if (order.filled_qty == order.qty) {
@@ -443,6 +447,7 @@ public:
 
                         if (best_bid_order.qty == best_bid_order.filled_qty) {
                             // 对手方订单完全成交，移除订单簿中的订单
+                            order_book.order_map.erase(best_bid_order.order_id);
                             order_book.bid_book[order_book.price_to_index(best_bid)].pop_front();
                         }
 
@@ -496,7 +501,9 @@ public:
 
                         if (best_bid_order.qty == best_bid_order.filled_qty) {
                             // 对手方订单完全成交，移除订单簿中的订单
+                            order_book.order_map.erase(best_bid_order.order_id);
                             order_book.bid_book[order_book.price_to_index(best_bid)].pop_front();
+                            
                         }
 
                         // 寻找下一个最优买价
