@@ -6,7 +6,30 @@
     1.此项目目前仅支持单个标的，如需支持多个标的，应该创建多个实例。
     2.不支持存储用户资金数据，用户资金数据应该由券商或结算中心管理。
 
-模块包括：
+搞懂一个技术概念的几个问题：是什么？有什么用？有什么优点？有什么隐患？ 
+利用原子变量生成唯一ID和使用uuid有什么区别？原子变量自增快，天然有序。
+如果直接生成纳秒级时间戳是不是就不需要原子变量了？否，会出现重复。
+用时间戳拼接原子变量，如果发生时钟回拨，怎么保证先来先撮合？不要用时间戳，完全用原子变量。或者steady_clock。
+行情查询获取订单簿快照和撮合引擎线程会有锁竞争吧？对，考虑加锁解决。
+shared_mutex会给uniquelock让步吗？不会，写者会饿死，可以用顺序锁。
+顺序锁有类似aba的问题吧？有，但是用uint64_t就能解决。更严重的是指令重排问题？用内存屏障解决。
+这里撮合引擎和网关也会争抢原子计数器的锁吧？MESI协议，只需承担通知其他CPU核心的开销。
+
+
+模块/模型包括 订单簿 网关 撮合引擎 ：
+
+接口设计很重要，有好的接口，编程会很方便。更换实现的时候，接口和接口另一端的代码不需要修改。
+    1.用户与网关的接口：
+        1.下单请求：HTTP POST JSON
+        2.撤单请求：HTTP POST JSON
+        3.查单请求：HTTP POST JSON
+        4.成交回报：暂无。
+        5.行情推送：用户需要主动发起查询行情的请求HTTP POST JSON。网关查询订单簿后发送HTTP，这个怎么做？。
+    2.网关与撮合引擎的接口：
+        1.存放下单撤单请求的队列
+        2.存放成交回报的队列。
+    行情推送在哪？？顺序锁
+
 
 1.订单（Order）：
     包含字段：order_id（直接用网关层打的tag），ts，symbol_id, trader_id, price，qty，filled_qty, side, order_type, tif, order_status
@@ -32,6 +55,7 @@
 
 
 3.网关（Gateway）：开放HTTP接口。总共4个无锁队列，使用moodycamel::ConcurrentQueue。
+
     开放接口：
         HTTP接口：从接口中提取数据，打标签，放入队列
             /submit_order
@@ -90,6 +114,7 @@
                     }
         Websocket接口：
             暂时不实现，以后再写。
+            实现websocket接口才能方便地实现行情推送、成交回报推送。
     响应：
         HTTP即时响应：
         {
@@ -133,7 +158,7 @@
             打标签：负责给用户请求打标签（tag），标签 = 时间戳（timestamp） + 标的编号（symbol_id） + 递增序列号（递增序列号怎么获取？原子变量）
             定序：然后异步地把请求(SubmitRequest、CancelRequest)加入输入无锁队列（RequestQueue）。
         查单OrderStatusQueue请求(QueryRequest)：
-            查单(query_order)：在网关模块维护一个std::unordered_map(order_id, OrderStatus)，map监听TradeResponseQueue来实时更新，用户查单时从这里获取订单状态，然后异步地放入订单状态无锁队列（OrderStatusQueue），由另一个线程去进行分发。
+            查单(query_order)：在网关模块维护一个std::unordered_map(order_id, OrderStatus)，map监听TradeResponseQueue来实时更新，收到查单请求时，直接查询map，直接返回回报。
     输出队列：
         成交回报队列(TradeResponseQueue(TradeResponse))：创建一个消费者线程专门分发成交回报。
             成交回报应包含字段：response_type, order_id, trader_id, symbol_id, side, filled_qty, price, status

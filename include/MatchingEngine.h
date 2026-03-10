@@ -78,6 +78,8 @@ public:
                     try_macth(order);
                 } else if (req_env.req_type == RequestType::CANCEL) {
                     // 处理撤单请求
+                    spdlog::debug("Received cancel request: order_id {}, trader_id {}, symbol_id {}",
+                        req_env.data.cancel_req.order_id, req_env.data.cancel_req.trader_id, req_env.data.cancel_req.symbol_id);
                     try_cancel(req_env.data.cancel_req);
                 } else if (req_env.req_type == RequestType::SUBSCRIBE_MARKET_DATA) {
                     // 处理行情订阅请求
@@ -183,7 +185,7 @@ public:
             if (order.order_type == OrderType::LIMIT) {
                 if (order.tif == TimeInForce::GTC) {
                     int64_t best_ask = order_book.get_best_ask();
-                        // 可以撮合，执行撮合逻辑
+                    // 可以撮合，执行撮合逻辑
                     while (order.qty > order.filled_qty && best_ask != -1 && order.price >= best_ask) {
                         Order& best_ask_order = order_book.ask_book[order_book.price_to_index(best_ask)].front();
                         uint32_t trade_qty = std::min(order.qty - order.filled_qty, best_ask_order.qty - best_ask_order.filled_qty);
