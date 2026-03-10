@@ -48,6 +48,7 @@ public:
         order_map.reserve(1000);
     }
 
+    // 买一价和卖一价应该用一个变量记录，快速索引，这里暂时先这样写。
     int64_t get_best_bid() const {
         for (size_t i = bid_book.size() - 1; i >= 0; --i) {
             if (!bid_book[i].empty()) {

@@ -26,6 +26,27 @@ int main(int argc, char** argv) {
         MatchingEngine engine(order_queue, trade_response_queue, market_data_queue);
         Gateway gateway(order_queue, trade_response_queue, market_data_queue);
 
+        if (argc > 1 && std::string(argv[1]) == "--http-stress") {
+            // HTTP 压测模式默认关闭 debug 日志，避免大量日志影响吞吐
+            spdlog::set_level(spdlog::level::warn);
+            int thread_count = 16;
+            int ops_per_thread = 20000;
+            if (argc > 2) {
+                thread_count = std::stoi(argv[2]);
+            }
+            if (argc > 3) {
+                ops_per_thread = std::stoi(argv[3]);
+            }
+
+            // 等待 HTTP server 启动完成
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            gateway.stress_http_pipeline(thread_count, ops_per_thread);
+
+            // 给撮合线程和回报线程一点时间清空队列
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+            return 0;
+        }
+
         if (argc > 1 && std::string(argv[1]) == "--stress") {
             // 压测模式下关闭 debug 洪泛日志，避免淹没最终统计摘要
             spdlog::set_level(spdlog::level::warn);

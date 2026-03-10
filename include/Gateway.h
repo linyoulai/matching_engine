@@ -268,7 +268,11 @@ public:
                 submit_req.order_type = body["order_type"] == "LIMIT" ? OrderType::LIMIT : OrderType::MARKET;
                 submit_req.tif = body["tif"] == "GTC" ? TimeInForce::GTC : (body["tif"] == "IOC" ? TimeInForce::IOC : TimeInForce::FOK);
                 this->on_submit_order(submit_req); 
-                res.set_content("{\"status\":\"ACCEPTED\"}", "application/json");
+                nlohmann::json resp;
+                resp["status"] = "ACCEPTED";
+                resp["order_id"] = submit_req.tag;
+                resp["timestamp"] = submit_req.ts;
+                res.set_content(resp.dump(), "application/json");
             } catch (...) {
                 res.status = 400;
                 res.set_content("{\"status\":\"REJECTED\"}", "application/json");
@@ -530,6 +534,126 @@ public:
             total_submits.load(std::memory_order_relaxed),
             total_cancels.load(std::memory_order_relaxed),
             elapsed_ms);
+    }
+
+    // HTTP 链路压测：网关解析 -> 请求入队 -> 撮合引擎处理 -> 成交回报队列消费
+    void stress_http_pipeline(int thread_count, int ops_per_thread) {
+        if (thread_count <= 0 || ops_per_thread <= 0) {
+            spdlog::warn("stress_http_pipeline skipped: invalid args thread_count={}, ops_per_thread={}",
+                thread_count, ops_per_thread);
+            return;
+        }
+
+        auto start = std::chrono::steady_clock::now();
+        std::vector<std::thread> workers;
+        workers.reserve(static_cast<size_t>(thread_count));
+
+        std::atomic<uint64_t> submit_ok{0};
+        std::atomic<uint64_t> cancel_ok{0};
+        std::atomic<uint64_t> query_ok{0};
+        std::atomic<uint64_t> http_errors{0};
+
+        for (int tid = 0; tid < thread_count; ++tid) {
+            workers.emplace_back([this, tid, ops_per_thread, &submit_ok, &cancel_ok, &query_ok, &http_errors]() {
+                httplib::Client cli("127.0.0.1", 8080);
+                cli.set_keep_alive(true);
+
+                std::mt19937_64 rng(static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()) + static_cast<uint64_t>(tid));
+                std::uniform_int_distribution<int> side_dist(0, 1);
+                std::uniform_int_distribution<int> price_dist(10000, 10100);
+                std::uniform_int_distribution<int> qty_dist(1, 1000);
+                std::uniform_int_distribution<int> symbol_dist(1, 3);
+                std::uniform_int_distribution<int> coin_dist(0, 99);
+
+                std::vector<uint64_t> order_ids;
+                order_ids.reserve(static_cast<size_t>(ops_per_thread));
+
+                for (int i = 0; i < ops_per_thread; ++i) {
+                    uint32_t symbol_id = static_cast<uint32_t>(symbol_dist(rng));
+                    uint32_t trader_id = static_cast<uint32_t>(10000 + tid);
+
+                    nlohmann::json submit_payload;
+                    submit_payload["symbol_id"] = symbol_id;
+                    submit_payload["trader_id"] = trader_id;
+                    submit_payload["price"] = price_dist(rng);
+                    submit_payload["qty"] = qty_dist(rng);
+                    submit_payload["side"] = side_dist(rng) == 0 ? "BUY" : "SELL";
+                    submit_payload["order_type"] = "LIMIT";
+                    submit_payload["tif"] = "GTC";
+
+                    auto submit_res = cli.Post("/submit_order", submit_payload.dump(), "application/json");
+                    if (submit_res && submit_res->status == 200) {
+                        submit_ok.fetch_add(1, std::memory_order_relaxed);
+                        try {
+                            auto submit_json = nlohmann::json::parse(submit_res->body);
+                            if (submit_json.contains("order_id")) {
+                                order_ids.push_back(submit_json["order_id"].get<uint64_t>());
+                            }
+                        } catch (...) {
+                            http_errors.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    } else {
+                        http_errors.fetch_add(1, std::memory_order_relaxed);
+                        continue;
+                    }
+
+                    // 混入 query：施压网关解析和状态查询路径
+                    if (!order_ids.empty() && coin_dist(rng) < 50) {
+                        uint64_t oid = order_ids.back();
+                        nlohmann::json query_payload;
+                        query_payload["order_id"] = oid;
+                        query_payload["symbol_id"] = symbol_id;
+                        query_payload["trader_id"] = trader_id;
+
+                        auto query_res = cli.Post("/query_order", query_payload.dump(), "application/json");
+                        if (query_res && (query_res->status == 200 || query_res->status == 404)) {
+                            query_ok.fetch_add(1, std::memory_order_relaxed);
+                        } else {
+                            http_errors.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    }
+
+                    // 混入 cancel：施压网关解析 -> 取消请求入队 -> 引擎处理路径
+                    if (!order_ids.empty() && coin_dist(rng) < 30) {
+                        uint64_t oid = order_ids.back();
+                        nlohmann::json cancel_payload;
+                        cancel_payload["order_id"] = oid;
+                        cancel_payload["symbol_id"] = symbol_id;
+                        cancel_payload["trader_id"] = trader_id;
+
+                        auto cancel_res = cli.Post("/cancel_order", cancel_payload.dump(), "application/json");
+                        if (cancel_res && cancel_res->status == 200) {
+                            cancel_ok.fetch_add(1, std::memory_order_relaxed);
+                            order_ids.pop_back();
+                        } else {
+                            http_errors.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    }
+                }
+            });
+        }
+
+        for (auto& w : workers) {
+            if (w.joinable()) {
+                w.join();
+            }
+        }
+
+        auto end = std::chrono::steady_clock::now();
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+        double elapsed_s = static_cast<double>(elapsed_ms) / 1000.0;
+        uint64_t total_ok = submit_ok.load(std::memory_order_relaxed) + cancel_ok.load(std::memory_order_relaxed) + query_ok.load(std::memory_order_relaxed);
+        double total_qps = elapsed_s > 0.0 ? static_cast<double>(total_ok) / elapsed_s : 0.0;
+
+        spdlog::warn("HTTP stress finished: threads={}, ops_per_thread={}, submit_ok={}, cancel_ok={}, query_ok={}, http_errors={}, elapsed_ms={}, total_qps={}",
+            thread_count,
+            ops_per_thread,
+            submit_ok.load(std::memory_order_relaxed),
+            cancel_ok.load(std::memory_order_relaxed),
+            query_ok.load(std::memory_order_relaxed),
+            http_errors.load(std::memory_order_relaxed),
+            elapsed_ms,
+            total_qps);
     }
 
 };

@@ -1,210 +1,315 @@
-这是一个接近真实交易所的撮合引擎项目。
-
-目的：帮助对金融市场感兴趣的小伙伴理解交易所撮合机制。
+这是一个接近真实交易所的撮合引擎项目。  
 
 特别说明：
-    1.此项目目前仅支持单个标的，如需支持多个标的，应该创建多个实例。
-    2.不支持存储用户资金数据，用户资金数据应该由券商或结算中心管理。
 
-搞懂一个技术概念的几个问题：是什么？有什么用？有什么优点？有什么隐患？ 
-利用原子变量生成唯一ID和使用uuid有什么区别？原子变量自增快，天然有序。
-如果直接生成纳秒级时间戳是不是就不需要原子变量了？否，会出现重复。
-用时间戳拼接原子变量，如果发生时钟回拨，怎么保证先来先撮合？不要用时间戳，完全用原子变量。或者steady_clock。
-行情查询获取订单簿快照和撮合引擎线程会有锁竞争吧？对，考虑加锁解决。
-shared_mutex会给uniquelock让步吗？不会，写者会饿死，可以用顺序锁。
-顺序锁有类似aba的问题吧？有，但是用uint64_t就能解决。更严重的是指令重排问题？用内存屏障解决。
-这里撮合引擎和网关也会争抢原子计数器的锁吧？MESI协议，只需承担通知其他CPU核心的开销。
+1. 当前默认按单标的运行（要做多标的，建议多实例）。
+2. 不管理用户资金和持仓，这部分应该由券商柜台/风控/清结算系统负责。
 
+---
 
-模块/模型包括 订单簿 网关 撮合引擎 ：
+## 这个项目到底在做什么
 
-接口设计很重要，有好的接口，编程会很方便。更换实现的时候，接口和接口另一端的代码不需要修改。
-    1.用户与网关的接口：
-        1.下单请求：HTTP POST JSON
-        2.撤单请求：HTTP POST JSON
-        3.查单请求：HTTP POST JSON
-        4.成交回报：暂无。
-        5.行情推送：用户需要主动发起查询行情的请求HTTP POST JSON。网关查询订单簿后发送HTTP，这个怎么做？。
-    2.网关与撮合引擎的接口：
-        1.存放下单撤单请求的队列
-        2.存放成交回报的队列。
-    行情推送在哪？？顺序锁
+一句话：
+用户发 HTTP 下单/撤单/查单 -> 网关解析 JSON -> 入无锁队列 -> 撮合引擎消费并撮合 -> 回报队列异步返回。
 
+你可以把它理解成一个简化但完整的交易链路：
 
-1.订单（Order）：
-    包含字段：order_id（直接用网关层打的tag），ts，symbol_id, trader_id, price，qty，filled_qty, side, order_type, tif, order_status
-    订单类型枚举（OrderType）：包括限价单（LIMIT），市价单（MARKET）。
-    TimeInForce：tif包括GTC，IOC，FOK。
-    限价单合法tif: GTC，IOC，FOK
-    市价单合法TIF: IOC，FOK
-    订单状态（OrderStatus）：NEW，EXPIRED，PARTIAL_FILLED，FILLED，REJECTED。
-    // 订单
-    struct Order {};
-    
+1. 有网关（Gateway）
+2. 有订单簿（OrderBook）
+3. 有撮合引擎（MatchingEngine）
+4. 有异步队列解耦
+5. 有可重复压测入口
 
-2.请求(Request)：
-    请求类型：下单，撤单，查单
-    下单请求(OrderRequest)
-    撤单请求
-    查单请求
+---
 
-3.响应(Response):
-    HTTP接口响应：
-    成交回报：
-    行情推送：
+## 模块设计（按链路顺序）
 
+### 1) Gateway（网关）
 
-3.网关（Gateway）：开放HTTP接口。总共4个无锁队列，使用moodycamel::ConcurrentQueue。
+网关负责两件事：
 
-    开放接口：
-        HTTP接口：从接口中提取数据，打标签，放入队列
-            /submit_order
-                示例：
-                    请求字段：
-                    {
-                        "symbol_id": 888,
-                        "trader_id": 1001,
-                        "price": 10050, 
-                        "qty": 200,
-                        "side": "BUY",
-                        "order_type": "LIMIT",
-                        "tif": "GTC"
-                    }
-                    响应：
-                    {
-                        "status": "ACCEPTED",
-                        "order_id": 1741416550000001,
-                        "message": "Order has been queued."
-                    }
-            /cancel_order
-                示例：
-                    {
-                        "order_id": 1741416550000001,
-                        "symbol_id": 888,
-                        "trader_id": 1001
-                    }
-                    {
-                        "status": "ACCEPTED",
-                        "order_id": 1741416550000001,
-                        "message": "Cancellation request queued."
-                    }
-                    {
-                        "status": "SUCCESS",
-                        "order_id": 1741416550000001,
-                        "message": "canceled sucessfully"
-                    }
-                    {
-                        "status": "Failed",
-                        "order_id": 1741416550000001,
-                        "message": "cancel failed"
-                    }
-            /query_order
-                示例：
-                    {
-                        "order_id": 1741416550000001,
-                        "symbol_id": 888,
-                        "trader_id": 1001
-                    }
-                    {
-                        "order_id": 1741416550000001,
-                        "status": "PARTIAL_FILLED",
-                        "filled_qty": 100,
-                        "remaining_qty": 100,
-                        "avg_price": 10050
-                    }
-        Websocket接口：
-            暂时不实现，以后再写。
-            实现websocket接口才能方便地实现行情推送、成交回报推送。
-    响应：
-        HTTP即时响应：
-        {
-            "status": "ACCEPTED",
-            "order_id": 1741416550000001, 
-            "timestamp": 1741416550
-        }
-        成交回报：
-        {
-            "response_type": "TRADE_RESPONSE",
-            "order_id": 1741416550000001,
-            "trader_id": ,
-            "symbol_id": ,
-            "side": ,
-            "filled_qty": 100,
-            "price": 10050,
-            "status": "FILLED"
-        }
-        行情推送(5档):
-        {
-            "response_type": "MARKET_DATA_SNAPSHOT",
-            "symbol_id": 888,
-            "timestamp": 1741416550,
-            "bids": [
-                {"price": 10049, "qty": 500},
-                {"price": 10048, "qty": 300},
-                {"price": 10047, "qty": 1200},
-                {"price": 10046, "qty": 800},
-                {"price": 10045, "qty": 100}
-            ],
-            "asks": [
-                {"price": 10051, "qty": 400},
-                {"price": 10052, "qty": 600},
-                {"price": 10053, "qty": 200},
-                {"price": 10054, "qty": 900},
-                {"price": 10055, "qty": 150}
-            ]
-        }
-    输入队列：
-        下单、撤单OrderQueue：
-            打标签：负责给用户请求打标签（tag），标签 = 时间戳（timestamp） + 标的编号（symbol_id） + 递增序列号（递增序列号怎么获取？原子变量）
-            定序：然后异步地把请求(SubmitRequest、CancelRequest)加入输入无锁队列（RequestQueue）。
-        查单OrderStatusQueue请求(QueryRequest)：
-            查单(query_order)：在网关模块维护一个std::unordered_map(order_id, OrderStatus)，map监听TradeResponseQueue来实时更新，收到查单请求时，直接查询map，直接返回回报。
-    输出队列：
-        成交回报队列(TradeResponseQueue(TradeResponse))：创建一个消费者线程专门分发成交回报。
-            成交回报应包含字段：response_type, order_id, trader_id, symbol_id, side, filled_qty, price, status
-        行情推送队列(MarketDataQueue(MarketDataResponse))：创建一个消费者线程专门分发行情推送。
-            行情推送应包含字段：response_type, symbol_id, timestamp, bids(price, qty), asks(price, qty).
+1. 对外提供 HTTP 接口（submit/cancel/query）
+2. 对内把请求转成 RequestEnvelope 投递到请求队列
 
+当前接口：
 
-4.订单簿（OrderBook）：
-    用vector+list+unordered_map实现，price(int64_t)为索引，price的精度为0.01元，考虑到A股的涨跌停板一般在10%，所以价格跳跃不会很大，所以vector不会占用很多内存。开盘前加载昨日收盘价，乘1.1设置为涨停板，乘0.9设置为跌停板。
-    前收盘价(prev_close_price)：计算公式有些复杂，暂时设置为一个定值。
-    今日涨停板：前收盘价 * 11 / 10 (注意处理四舍五入)
-    今日跌停板：前收盘价 * 9 / 10 (注意处理四舍五入)
-    索引 = price - lower_limit_price
-    price相同时用list存储订单：
-        1.撮合引擎插入：直接在list尾部插入。
-        2.撮合引擎取出：直接从list首部取出。
-        3.撮合引擎撤单：用unordered_map快速查询，如果查到了，就撤单。如果没有查到，说明已经成交了，就返回REJECTED。
-    用unordered_map存储每个订单对象的迭代器，用于快速撤单和查单。
+1. `POST /submit_order`
+2. `POST /cancel_order`
+3. `POST /query_order`
+4. `POST /subscribe_market_data`（占位，后续可扩展）
 
-5.单线程撮合引擎（MatchingEngine）：
-    这是核心，撮合引擎会从输入无锁队列中取出请求并尝试撮合，如果不能撮合就加入订单簿。
-    应该支持下单（submit_order）、撤单(cancel_order)。
-    撮合引擎每秒生成5档盘口快照（这里的5档是指有单的价格档位，如果所剩单不足5档，往后读到5档并置零即可），异步发送给行情推送无锁队列（MarketDataQueue）。
-    风险控制：
-        1.大额市价单保护：用户下单撮合只能吃5档订单，不能超出。
-        2.防止价格超出：用户下单时检查价格是否大于涨停板或小于跌停板，如果是的话就拒绝（不知道这个规则是否合理？）
-        3.防止自成交：用户下单后撮合时检查trader_id是否相同，如果能够撮合成功但是trader_id相同，立即停止撮合，但不撤回之前撮合成功的成交。剩余的订单状态改为REJECTED，并发送给TradeResponseQueue。
-    核心成员：
-        下单撤单队列的引用 order_queue 撮合引擎是消费者
-        成交回报队列的引用 trade_response_queue 撮合引擎是生产者
-        行情推送队列的引用 market_data_queue 撮合引擎是生产者
-        订单簿 OrderBook 维护买卖双方的订单
-    核心函数：
-        构造函数: 传入引用order_queue, trade_response_queue, market_data_queue
-        死循环运行 run() : 轮询 order_queue , 如果有订单则 try_match()。
-        尝试撮合 try_match() ：如果撮合成功，生成成交回报，如果有剩余或者没能撮合成功，加入订单簿。
+为什么要有网关：
 
-6.主函数：
-    创建order_queue, trade_response_queue, market_data_queue
-    创建撮合引擎对象，传入队列引用
-    创建网关对象，传入队列引用
+1. 隔离协议层（HTTP/JSON）和撮合核心
+2. 撮合引擎只关心 Order/Cancel，不关心网络细节
+3. 后续替换成 WebSocket / gRPC，核心撮合代码基本不用动
 
-6.成交回报(存在于网关模块中)：当撮合完毕时，异步地将结果放入成交回报无锁队列（TradeResponseQueue），由网关取出并发回给用户。
+### 2) Request/Response（请求与回报）
 
-7.行情推送(存在于网关模块中)：用发布订阅模式，用户订阅之后，由网关从MarketDataQueue取数据分发。
+请求分三类：
 
-日志：用spdlog同时打印到控制台和输出到txt文件。
+1. 下单
+2. 撤单
+3. 查单
 
-命名风格：函数名、变量名用蛇形。类名、结构体名用大驼峰。
+成交回报通过异步队列返回，网关再消费并维护订单状态映射，供查单接口读取。
+
+### 3) OrderBook（订单簿）
+
+当前实现是 `vector + list + unordered_map`：
+
+1. `vector` 按价格档位存队列（价格索引连续，CPU 友好）
+2. `list` 维护同价位时间优先（FIFO）
+3. `unordered_map<order_id, iterator>` 支撑 O(1) 级别查找撤单
+
+设计直觉：
+A 股日内价格区间有限，按价位开 `vector` 比树结构更快，缓存命中更好。
+
+### 4) MatchingEngine（单线程撮合）
+
+撮合引擎是核心消费者：
+
+1. 从请求队列拉取请求
+2. 下单则尝试撮合，不可成交部分入簿
+3. 撤单则在 order_map 中定位后删除
+4. 生成成交回报，推送到回报队列
+
+支持的订单语义：
+
+1. `OrderType`: LIMIT / MARKET
+2. `TimeInForce`: GTC / IOC / FOK
+
+已做的风控约束：
+
+1. 价格上下限检查（超涨跌停拒绝）
+2. 市价单 5 档保护（防止大额扫穿）
+3. 自成交拦截（匹配到同 trader_id 时终止后续）
+
+---
+
+## 关键数据结构
+
+### Order 字段
+
+1. `order_id`（当前用网关 tag）
+2. `ts`
+3. `symbol_id`
+4. `trader_id`
+5. `price`
+6. `qty`
+7. `filled_qty`
+8. `side`
+9. `order_type`
+10. `tif`
+11. `order_status`
+
+### tag 生成方式
+
+当前是：`timestamp + symbol_id + sequence` 拼接。  
+优点是快、局部有序、实现简单。  
+注意点是：时钟回拨和跨核可见性问题要明确处理策略。
+
+---
+
+## 接口示例
+
+### 1) 提交订单
+
+```
+POST /submit_order
+```
+
+请求：
+
+```json
+{
+  "symbol_id": 888,
+  "trader_id": 1001,
+  "price": 10050,
+  "qty": 200,
+  "side": "BUY",
+  "order_type": "LIMIT",
+  "tif": "GTC"
+}
+```
+
+响应：
+
+```json
+{
+  "status": "ACCEPTED",
+  "order_id": 1741416550000001,
+  "timestamp": 1741416550
+}
+```
+
+### 2) 撤单
+
+```
+POST /cancel_order
+```
+
+请求：
+
+```json
+{
+  "order_id": 1741416550000001,
+  "symbol_id": 888,
+  "trader_id": 1001
+}
+```
+
+响应（示例）：
+
+```json
+{
+  "status": "ACCEPTED"
+}
+```
+
+### 3) 查单
+
+```
+POST /query_order
+```
+
+请求：
+
+```json
+{
+  "order_id": 1741416550000001,
+  "symbol_id": 888,
+  "trader_id": 1001
+}
+```
+
+响应（示例）：
+
+```json
+{
+  "order_id": 1741416550000001,
+  "status": "PARTIAL_FILLED",
+  "message": "Success"
+}
+```
+
+---
+
+## 如何运行
+
+### 构建
+
+```bash
+cmake -S . -B build
+cmake --build build -j
+```
+
+### 普通模式
+
+```bash
+./build/main
+```
+
+### 队列链路压测（函数直调）
+
+```bash
+./build/main --stress 16 1000000
+```
+
+### HTTP 链路压测（真实走 JSON 解析）
+
+```bash
+./build/main --http-stress 16 2000
+```
+
+参数说明：
+
+1. 第一个参数：并发线程数
+2. 第二个参数：每线程操作次数
+
+---
+
+## 压测结果（windows11 16个逻辑处理器）
+
+### 1) 请求队列 -> 撮合引擎 -> 回报队列
+
+量级大约 `4.3M ~ 4.7M ops/s`（submit+cancel 合计）。
+
+样例：
+
+1. `--stress 16 200000` -> `elapsed_ms=1345`
+2. `--stress 16 500000` -> `elapsed_ms=3681`
+3. `--stress 16 1000000` -> `elapsed_ms=7424`
+
+### 2) HTTP JSON 解析 -> 请求队列 -> 撮合引擎 -> 回报队列
+
+当前大约 `380~400 QPS`。  
+这说明瓶颈主要在 HTTP/JSON 层，而不是撮合核心。
+
+样例：
+
+1. `--http-stress 16 20` -> `total_qps≈372`
+2. `--http-stress 16 200` -> `total_qps≈369`
+3. `--http-stress 16 2000` -> `total_qps≈399`
+
+---
+
+## 设计思考（这部分很重要）
+
+做系统设计时，我习惯问四个问题：
+
+1. 是什么？
+2. 有什么用？
+3. 有什么优点？
+4. 有什么隐患？
+
+下面是项目里的几个典型例子。
+
+### Q1: 原子自增 ID 和 UUID 有什么区别？
+
+1. 原子自增：快、天然有序、cache 友好；但是单点序列，要考虑跨实例策略。
+2. UUID：全局唯一更方便分布式；但空间大、无序、索引局部性差。
+
+### Q2: 直接用纳秒时间戳就行吗？
+
+不行。  
+高并发下同一时钟粒度可能重复，跨核取时也可能碰撞。
+
+### Q3: 时钟回拨怎么办？
+
+1. 交易排序最好不要依赖系统时间。
+2. 可用单调时钟（steady_clock）做相对时间。
+3. 更稳妥的是用引擎内递增序列作为最终时序依据。
+
+### Q4: 行情快照和撮合线程会不会锁竞争？
+
+会。  
+如果读写模型不当，会出现写者/读者饥饿，吞吐抖动。
+
+### Q5: shared_mutex 会不会让 unique_lock？
+
+标准不保证公平策略。某些实现上确实可能让写者饥饿。  
+所以高频场景要评估替代方案（比如 seqlock/RCU/快照复制）。
+
+### Q6: 原子变量是不是“没有成本”？
+
+不是。  
+原子带来的开销核心在缓存一致性协议（MESI）引发的跨核同步，不是“完全免费”。
+
+---
+
+## 当前不足和下一步
+
+现在这个工程已经能做：
+
+1. 功能闭环
+2. 并发压测
+3. 基本可观测
+
+但要继续往“实盘级别”靠，还要补：
+
+1. 多标的分片与隔离
+2. 回报/行情 WebSocket 推送
+3. 落盘与恢复
+4. 更细粒度性能指标（分阶段耗时、尾延迟）
+5. 完整自动化测试与故障注入
