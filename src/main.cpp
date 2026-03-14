@@ -15,12 +15,11 @@
 
 int main(int argc, char** argv) {
     spdlog::set_level(spdlog::level::debug);
-    spdlog::info("System Starting...");
+    spdlog::info("系统启动...");
 
     try {
         moodycamel::ConcurrentQueue<RequestEnvelope> order_queue; // 下单、撤单队列
         moodycamel::ConcurrentQueue<TradeResponse> trade_response_queue; // 成交回报队列
-
         moodycamel::ConcurrentQueue<MarketDataResponse> market_data_queue; // 行情推送队列
 
         MatchingEngine engine(order_queue, trade_response_queue, market_data_queue);
@@ -59,12 +58,12 @@ int main(int argc, char** argv) {
                 ops_per_thread = std::stoi(argv[3]);
             }
 
-            spdlog::info("Run stress mode: threads={}, ops_per_thread={}", thread_count, ops_per_thread);
+            spdlog::info("运行压力测试模式: threads={}, ops_per_thread={}", thread_count, ops_per_thread);
             gateway.stress_submit_cancel(thread_count, ops_per_thread);
 
             // 给撮合线程和回报线程一点时间清空队列
             std::this_thread::sleep_for(std::chrono::seconds(2));
-            spdlog::info("Stress mode finished, exiting...");
+            spdlog::info("压力测试模式完成，退出...");
             return 0;
         }
 
@@ -77,10 +76,10 @@ int main(int argc, char** argv) {
         }
         
     } catch (const std::exception& e) {
-        spdlog::error("System crashed: {}", e.what());
+        spdlog::error("系统崩溃: {}", e.what());
         return 1;
     }
 
-    spdlog::info("System shutdown complete.");
+    spdlog::info("系统关闭完成。");
     return 0;
 }

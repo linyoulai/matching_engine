@@ -24,8 +24,9 @@ find_package(Threads REQUIRED)
 # 建议把 Gateway 的实现写在 src/Gateway.cpp 中
 set(SOURCES 
     src/main.cpp
-    # src/Gateway.cpp  # 如果你把实现移到了 cpp 文件，请取消注释
-    # src/MatchingEngine.cpp 
+    src/Gateway.cpp
+    src/MatchingEngine.cpp
+    src/OrderBook.cpp
 )
 
 # 6. 生成可执行文件
